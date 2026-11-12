@@ -5,7 +5,6 @@
 Mat Photo::flipped(const Mat &image) {
     Mat image_flipped;
 
-    //翻转图像
     flip(image,image_flipped,0);
     return image_flipped;
 }
@@ -18,7 +17,6 @@ Mat Photo::get_mask(const Mat &image) {
     GaussianBlur(gray, blurred, Size(3, 3), 0);
     threshold(blurred, mask, 200, 255, THRESH_BINARY);
 
-    imwrite("output/target_mask.png", mask);
     return mask;
 }
 
@@ -30,20 +28,19 @@ Mat Photo::mask_morphology(const Mat &mask) {
 
     morphologyEx(mask, mask_close, MORPH_CLOSE, kernel);
 
-    imwrite("output/mask_close.png", mask_close);
     return mask_close;
 }
 
 
-Light::Light(const RotatedRect &r)
-    : rect(r), center(r.center) {
+Light::Light(const RotatedRect &r,const Mat &image): rect(r), center(r.center) {
     long_side  = max(r.size.width, r.size.height);
     short_side = min(r.size.width, r.size.height);
     angle      = get_angle(r);
+    get_color(image);
 }
 
 
-vector<Light> Photo::get_lights(const Mat &mask,Mat &image) {
+vector<Light> Photo::get_lights(const Mat &mask,const Mat &image) {
     //准备存放轮廓的数组和mask
     vector<vector<Point>> contours;
     Mat mask_clone=mask.clone();
@@ -54,7 +51,6 @@ vector<Light> Photo::get_lights(const Mat &mask,Mat &image) {
     //收集所有灯带
     vector<Light> lights;
     for ( const auto& contour : contours) {
-
         //1.面积筛选
         double area=contourArea(contour);
         cout << "候选面积：" << area << endl;
@@ -73,8 +69,7 @@ vector<Light> Photo::get_lights(const Mat &mask,Mat &image) {
         }
 
         //收集灯带信息
-        Light l(c_rect);
-        l.get_color(image);
+        Light l(c_rect,image);
         lights.push_back(l);
     }
 
@@ -83,18 +78,16 @@ vector<Light> Photo::get_lights(const Mat &mask,Mat &image) {
 }
 
 
-// 在图像副本上画出所有灯条候选：旋转矩形 + 中心点 + 编号
 void Photo::draw_lights( Mat &canva, const vector<Light> &lights) {
 
     for (int i = 0; i < (int)lights.size(); i++) {
         const Light &l=lights[i];
 
-        Point2f p4[4];
-        l.rect.points(p4);
-        vector<Point> poly(p4, p4 + 4);
+        Point2f corners[4];
+        l.rect.points(corners);
+        vector<Point> light_corners(corners, corners + 4);
 
-        //画框、中心点、编号
-        polylines(canva, poly, true, Scalar(0,0,255), 2);
+        polylines(canva, light_corners, true, Scalar(0,0,255), 2);
         circle(canva, l.center, 3, Scalar(0,255,0), -1);
         putText(canva, to_string(i),
                 l.center + Point2f(-14, -l.long_side * 0.5f - 6),
@@ -105,7 +98,7 @@ void Photo::draw_lights( Mat &canva, const vector<Light> &lights) {
 
 
 bool can_pair(const Light &l1, const Light &l2) {
-    //a.颜色必须一致
+    //a.颜色一致（允许有一方不确定）
     if (l1.color != l2.color &&
         l1.color != "unknown" && l2.color != "unknown") {
         return false;
@@ -130,7 +123,7 @@ bool can_pair(const Light &l1, const Light &l2) {
         return false;
     }
 
-    //e.水平间距要合理（用灯条长度的倍数，不用固定像素）
+    //e.中心的左/右偏差
     float dx = abs(l1.center.x - l2.center.x);
     if (dx < 1.5f * aver_long || dx > 6.0f * aver_long) {
         return false;
@@ -143,6 +136,7 @@ bool can_pair(const Light &l1, const Light &l2) {
 
 vector<pair<int, int>> get_pairlights(const vector<Light> &lights) {
     vector<pair<int, int>> pairlights;
+    //记录灯带的配对情况，先初始化全部未配对
     vector<bool> used(lights.size(), false);
 
     for (int i = 0; i < (int)lights.size(); i++) {
@@ -155,60 +149,62 @@ vector<pair<int, int>> get_pairlights(const vector<Light> &lights) {
 
             if (!can_pair(l1, l2)) continue;
 
-            pairlights.emplace_back(i, j);   // 存下标
+            //保证左侧灯条编号在前
+            if (lights[i].center.x <= lights[j].center.x) {
+                pairlights.emplace_back(i, j);
+            } else {
+                pairlights.emplace_back(j, i);
+            }
+
             used[i] = used[j] = true;
             break;
         }
     }
+
     return pairlights;
 }
 
 
-Armor::Armor( const Light &l1, const Light &l2,const Mat &image) {
-    // 1.由8个灯条顶点确定最小外接矩形
+Armor::Armor( const Light &l1, const Light &l2,int left_id,int right_id,const Mat &image) {
+    // 1.获得构成灯带的编号
+    left_light_id  = left_id;
+    right_light_id = right_id;
+
+    // 2.由8个灯带顶点确定最小外接矩形
     vector<Point2f> pts(8);
     l1.rect.points(&pts[0]);
     l2.rect.points(&pts[4]);
 
     RotatedRect pairlights_rect = minAreaRect(pts);
 
-    // 2.把配对灯带的外接矩形信息装进Armor：获得装甲板--外接框 中心点 四角点(传入后由构造函数角点自动排序）
+    // 3.获得装甲板的外接框、中心点、四角点
     rect    = pairlights_rect;
     center  = pairlights_rect.center;
     corners = get_rect_corners(pairlights_rect);
 
-    // 3.确定装甲板颜色
-    if (l1.color == l2.color) {
-        color = l1.color;
-    }
-    else if (l1.color == "unknown") {
-        color = l2.color;               // 若有一根灯颜色可以判断，则用能判出来的那根
-    }
-    else if (l2.color == "unknown") {
-        color = l1.color;
-    }
-    else {
-        color = "unknown";
-    }
+    // 4.获得装甲板颜色（允许一条灯带颜色未知）
+    if      (l1.color==l2.color)    color=l1.color;
+    else if (l1.color == "unknown") color = l2.color;
+    else if (l2.color == "unknown") color = l1.color;
+    else                            color = "unknown";
 
-    // 4.确定有效性
+    // 5.获得有效性
     check_valid(image);
-
 }
 
 
 void delete_repeat_armors(vector<Armor> &armors) {
     vector<Armor> keep;
 
-    for (const Armor &a : armors) {
-        bool repeat = false;
+    for (const Armor &a:armors) {
+        bool repeat=false;
 
-        for (const Armor &k : keep) {
-            float th = 0.3f * max(a.rect.size.width, a.rect.size.height);
+        for (const Armor &k:keep) {
+            float threshold = 0.3f * max(a.rect.size.width, a.rect.size.height);
 
             //x、y 都比阈值近，就算同一块
-            if (abs(a.center.x - k.center.x) < th &&
-                abs(a.center.y - k.center.y) < th) {
+            if (abs(a.center.x - k.center.x) < threshold &&
+                abs(a.center.y - k.center.y) < threshold) {
                 repeat = true;
                 break;
                 }
@@ -229,7 +225,7 @@ void Photo::draw_armor(Mat &canva,const Armor &armor) {
     vector<Point> corners_int(armor.corners.begin(), armor.corners.end());
     polylines(canva, corners_int, true, Scalar(0,0,255), 2);
 
-    // 2.让四个角点在图上显示编号
+    // 2.显示角点编号
     for (int i = 0; i < 4; i++) {
         circle(canva, armor.corners[i], 3, Scalar(0,0,255), -1);
         Point2f offset[] = { {-20, -8}, {6, -8}, {6, 12}, {-20, 12} };
@@ -241,11 +237,25 @@ void Photo::draw_armor(Mat &canva,const Armor &armor) {
 
     // 3.画中心点
     circle(canva, armor.center, 3, Scalar(0,255,0), -1);
-
 }
 
 
-
+void Armor::print_information() const{
+    cout << "===== 装甲板 =====" << endl;
+    cout << "颜色：" << color << endl;
+    cout << "左灯条：编号" << left_light_id << "  "
+         << "右灯条：编号" << right_light_id << endl;
+    cout << "外接框：" << rect.size.width << " x " << rect.size.height
+         << "  角度：" << rect.angle << "°" << endl;
+    cout << "中心：("  << center.x << ", " << center.y << ")" << endl;
+    cout << "角点：";
+    for (int i = 0; i < 4; i++) {
+        cout << i << "(" << corners[i].x << ","
+             << corners[i].y << ") ";
+    }
+    cout << endl;
+    cout << "目标" << (valid ? "有效" : "无效") << endl;
+}
 
 
 
@@ -306,27 +316,27 @@ void Light::get_color(const Mat &image) {
 
 array<Point2f, 4> get_rect_corners(const RotatedRect &r) {
     // 1.先得到两个边的单位向量作为方向基准
-    float th = r.angle * (float)CV_PI / 180.f;
-    Point2f wdir(cos(th), sin(th));    // size.width 那条边的方向
-    Point2f hdir(-wdir.y, wdir.x);     // 垂直方向（向量转 90°）
+    float th = r.angle * PI / 180.f;
+    Point2f width_dir(cos(th), sin(th));
+    Point2f height_dir(cos(th+PI/2), sin(th+PI/2));
 
     // 2.找更贴近原图水平的一边作为x轴基准
-    bool use_w = abs(wdir.x) >= abs(hdir.x);
+    bool use_w = abs(width_dir.x) >= abs(height_dir.x);
 
-    // 3. a朝右，b朝下
-    Point2f a = use_w ? wdir : hdir;
-    if (a.x < 0) a = -a;                   // 强制朝右
-    Point2f b(-a.y, a.x);              // b.y = a.x > 0，自动朝下
+    // 3.让a朝右，b朝下(相当于新的x,y轴正方向）
+    Point2f a = use_w ? width_dir : height_dir;
+    if (a.x < 0) a = -a;
+    Point2f b(-a.y, a.x);
 
     // 4.从中心出发，各走两个半步前往四个角
-    array<Point2f, 4> out;
+    array<Point2f, 4> corners;
     float pa = (use_w ? r.size.width  : r.size.height) * 0.5f;
     float pb = (use_w ? r.size.height : r.size.width ) * 0.5f;
-    out[0] = r.center - a * pa - b * pb;   // 左上
-    out[1] = r.center + a * pa - b * pb;   // 右上
-    out[2] = r.center + a * pa + b * pb;   // 右下
-    out[3] = r.center - a * pa + b * pb;   // 左下
-    return out;
+    corners[0] = r.center - a * pa - b * pb;   // 左上
+    corners[1] = r.center + a * pa - b * pb;   // 右上
+    corners[2] = r.center + a * pa + b * pb;   // 右下
+    corners[3] = r.center - a * pa + b * pb;   // 左下
+    return corners;
 }
 
 
@@ -334,7 +344,7 @@ array<Point2f, 4> get_rect_corners(const RotatedRect &r) {
 void Armor::check_valid(const Mat &image) {
     valid = false;
 
-    //1.四个角必须在图像内
+    //1.角点位置检查
     for (int i = 0; i < 4; i++) {
         if (corners[i].x < 0 || corners[i].x >= image.cols ||
             corners[i].y < 0 || corners[i].y >= image.rows) {
@@ -342,12 +352,12 @@ void Armor::check_valid(const Mat &image) {
             }
     }
 
-    //2.四边形面积不能为0
+    //2.面积检查
     if (rect.size.width * rect.size.height < 1.0f) {
         return;
     }
 
-    //3.形状要像一块装甲板：比对长宽比
+    //3.长宽比检查
     float armor_width=max(rect.size.width, rect.size.height);
     float armor_height=min(rect.size.width, rect.size.height);
     float armor_ratio=armor_width/armor_height;
@@ -361,16 +371,57 @@ void Armor::check_valid(const Mat &image) {
 
 
 float get_angle(const RotatedRect &r) {
-    //把旋转矩形的角度转成弧度，并定义w,h两个方向上的单位向量
-    float th = r.angle * (float)CV_PI / 180.f;
-    Point2f wdir(cos(th), sin(th));
-    Point2f hdir(-wdir.y, wdir.x);
+    //把旋转矩形的角度转成弧度，并定义width和height两个方向上的单位向量
+    float th = r.angle * PI / 180.f;
+    Point2f width_dir(cos(th), sin(th));
+    Point2f heigth_dir(cos(th+PI/2), sin(th+PI/2));
 
-    //哪条边更长，哪条就是长轴
-    Point2f longdir = (r.size.width >= r.size.height) ? wdir : hdir;
+    //长边为长轴
+    Point2f longdir=(r.size.width >= r.size.height)?width_dir:heigth_dir;
 
-    //统一让长轴指向"下"，消除"同一方向有两种表示"
+    //统一让长轴方向指向“下”
     if (longdir.y < 0) longdir = -longdir;
 
-    return atan2(longdir.x, longdir.y) * 180.f / (float)CV_PI;
+    //函数atan2(x, y)，得到从「+y 轴」量起，到向量(x, y)的带符号角度
+    return atan2(longdir.x, longdir.y) * 180.f / PI;
+}
+
+
+
+
+
+//---------------------------------------单帧检测接口---------------------------------------------------
+vector<Armor> detect_armors(const Mat &image, DetectDebug *debug) {
+    Photo demo;
+
+    //1.mask
+    Mat mask            = demo.get_mask(image);
+    Mat mask_morphology = demo.mask_morphology(mask);
+
+    //2.灯条
+    vector<Light> lights = demo.get_lights(mask_morphology, image);
+
+    //3.调试信息交给调用方
+    if (debug!=nullptr) {
+        debug->mask            = mask;
+        debug->mask_morphology = mask_morphology;
+        debug->lights          = lights;
+    }
+
+    //4.灯条配对
+    vector<pair<int,int>> pairlights = get_pairlights(lights);
+
+    //5.装甲板
+    vector<Armor> armors;
+
+    for (const auto &p : pairlights) {
+        Armor armor(lights[p.first], lights[p.second],p.first,p.second, image);
+        armors.push_back(armor);
+    }
+
+    delete_repeat_armors(armors);
+
+
+
+    return armors;
 }
