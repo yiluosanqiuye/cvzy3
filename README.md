@@ -38,10 +38,10 @@ cmake --build .
 
 ```bash
 # 使用默认图片 images/outpost_frame.png
-zy3.exe
+armor_detector.exe
 
 # 指定其他图片
-zy3.exe images/other.png
+armor_detector.exe images/other.png
 ```
 
 运行后弹出 `image` 和 `result` 两个窗口，按任意键退出。
