@@ -5,7 +5,7 @@
 Mat Photo::flipped(const Mat &image) {
     Mat image_flipped;
 
-    flip(image,image_flipped,0);
+    flip(image,image_flipped,-1);
     return image_flipped;
 }
 

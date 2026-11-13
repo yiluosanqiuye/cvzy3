@@ -125,9 +125,12 @@ struct DetectDebug {
 
 ```cpp
 while (cap.read(frame)) {
-    Mat image;
-    flip(frame, image, 0);                    // 翻正
-    vector<Armor> armors = detect_armors(image);   // ← 一行
+    // 直接在原始帧上检测：角点坐标与相机内参必须来自同一套图像
+    vector<Armor> armors = detect_armors(frame);
+
+    // 若希望结果画面正立，可另取一份画布旋转 180° 后绘制（仅影响观感）
+    Mat canva;
+    flip(frame, canva, -1);
     // 绘制、显示……
     waitKey(1);                                // 注意不能用 waitKey(0)
 }
@@ -195,5 +198,5 @@ while (cap.read(frame)) {
 - **只保留了灯条白芯**：灰度阈值只取最亮部分，实测灯条宽度约 5~6 px（真实 8~9 px），
   `minAreaRect` 的角度估计存在少量噪声，装甲板框比真实尺寸略小
 - **侧视会漏检**：机器人在转动时装甲板接近侧视，只能看到一根灯条，单帧无法配对
-- **预处理含一次垂直翻转**（`flip(0)`），前提是视频帧上下颠倒；换用其他来源的图片时需确认朝向
+- **预处理含一次 180° 旋转**（`flip(-1)`），前提是视频帧上下颠倒；换用其他来源的图片时需确认朝向
 - **单帧无跟踪**：帧与帧之间没有关联，目标短暂丢失后无法靠历史信息恢复
